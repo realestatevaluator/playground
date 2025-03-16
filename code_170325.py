@@ -6,7 +6,7 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 import psycopg2
 import datetime
 
-bot = Bot(token='7604394094:AAG2yCY5olqULu98xzyp7fahgmJrJPiaA2I')
+bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
