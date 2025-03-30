@@ -372,28 +372,3 @@ finally:
         cur.close()
         conn.close()
 print('Готово')
-
-# Итого:
-tech_features = ['source_id', 'city', 'parsed_at', 'url_link']
-significant_features = [  'rooms_count'
-                        , 'area_kitchen'
-                        , 'price_object'
-                        , 'normalized_price'
-                        , 'floors_count'
-                     , 'type_flat'
-                     , 'distance_to_center'
-                     , 'area_live_ratio'
-                     , 'area_kitchen_ratio'
-                     , 'area_live'    ]
-non_significant_features = ['area',
-                            'balcony_cat',
-                            'has_any_lift',
-                            'height_m',
-                            'house_type',
-                            'renovation',
-                            'window_type',
-                            'year_buld',
-                            'floor',
-                            'sanuzel_multiple',
-                            'sanuzel_per_room',
-                            'description_length']
