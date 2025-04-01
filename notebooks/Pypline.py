@@ -140,6 +140,8 @@ df = drop_high_perc_val_columns(df)
 df = df[(df['city'] == 'Нижний Новгород') | (df['city'] == 'Казань') | (df['city'] == 'Самара')]
 df = df[df['status_flat'] != 2]
 df = df.drop(['status_flat'], axis=1)
+df = df[df['type_flat'] != 2]
+df = df.drop(['type_flat'], axis=1)
 # print('Оставили только квартиры (без апартов)', df.shape)
 # ===========================================================================================================================
 # = address =====================================================
@@ -281,7 +283,6 @@ desired_order = [
     'area_kitchen',
     'area_live',
     'floors_count',
-    'type_flat',
     'distance_to_center',
     'area_live_ratio',
     'area_kitchen_ratio',
@@ -324,7 +325,6 @@ try:
       area_kitchen        DECIMAL(8, 4),
       area_live           DECIMAL(8, 4),
       floors_count        DECIMAL(8, 4),
-      type_flat           INT,
       distance_to_center  DECIMAL(8, 4),
       area_live_ratio     DECIMAL(8, 4),
       area_kitchen_ratio  DECIMAL(8, 4),
