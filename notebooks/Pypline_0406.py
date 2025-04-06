@@ -251,8 +251,8 @@ df.loc[df['city'] == 'Нижний Новгород', 'center_lat'] = 56.326797
 df.loc[df['city'] == 'Нижний Новгород', 'center_lng'] = 44.006516
 df.loc[df['city'] == 'Казань', 'center_lat'] = 55.796127
 df.loc[df['city'] == 'Казань', 'center_lng'] = 49.106414
-df.loc[df['city'] == 'Казань', 'center_lat'] = 53.195878
-df.loc[df['city'] == 'Казань', 'center_lng'] = 50.100202
+df.loc[df['city'] == 'Самара', 'center_lat'] = 53.195878
+df.loc[df['city'] == 'Самара', 'center_lng'] = 50.100202
 df['distance_to_center'] = df.apply(
     lambda row: geodesic((row['lat'], row['lng']), (row['center_lat'], row['center_lng'])).kilometers,
     axis=1
