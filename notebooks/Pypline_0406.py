@@ -162,12 +162,12 @@ city_coords = {
 }
 df['city'] = df.apply(determine_city, axis=1)
 df = df[(df['city'] == 'Нижний Новгород') | (df['city'] == 'Казань') | (df['city'] == 'Самара')]
-city_mapping = {
-    'Самара': 1,
-    'Нижний Новгород': 2,
-    'Казань': 3
-}
-df['city'] = df['city'].map(city_mapping)
+# city_mapping = {
+#     'Самара': 1,
+#     'Нижний Новгород': 2,
+#     'Казань': 3
+# }
+# df['city'] = df['city'].map(city_mapping)
 # =======================================================================================
 df.replace('nan', '', inplace=True)
 df.replace('', np.nan, inplace=True)
@@ -242,12 +242,17 @@ df = df[(df['floors_count']<80) & (df['floors_count']>0)]
 # print('После смерти выбрасов в floors_count', df.shape)
 
 # = distance_to_center ==================================================================
-df.loc[df['city'] == 2, 'center_lat'] = 56.326797
-df.loc[df['city'] == 2, 'center_lng'] = 44.006516
-df.loc[df['city'] == 3, 'center_lat'] = 55.796127
-df.loc[df['city'] == 3, 'center_lng'] = 49.106414
-df.loc[df['city'] == 1, 'center_lat'] = 53.195878
-df.loc[df['city'] == 1, 'center_lng'] = 50.100202
+# city_mapping = {
+#     'Самара': 1,
+#     'Нижний Новгород': 2,
+#     'Казань': 3
+# }
+df.loc[df['city'] == 'Нижний Новгород', 'center_lat'] = 56.326797
+df.loc[df['city'] == 'Нижний Новгород', 'center_lng'] = 44.006516
+df.loc[df['city'] == 'Казань', 'center_lat'] = 55.796127
+df.loc[df['city'] == 'Казань', 'center_lng'] = 49.106414
+df.loc[df['city'] == 'Казань', 'center_lat'] = 53.195878
+df.loc[df['city'] == 'Казань', 'center_lng'] = 50.100202
 df['distance_to_center'] = df.apply(
     lambda row: geodesic((row['lat'], row['lng']), (row['center_lat'], row['center_lng'])).kilometers,
     axis=1
@@ -284,7 +289,6 @@ significant_features = ['price_object',
  'area_kitchen_ratio',
  'area_per_renovation',
  'year_buld',
- 'city',
  'h3_categorical',
  'floors_count',
  'distance_to_center',
