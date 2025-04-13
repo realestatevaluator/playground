@@ -4,6 +4,7 @@ from aiogram.dispatcher.filters import Command, Text, RegexpCommandsFilter
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 import psycopg2
+import time
 import datetime
 
 bot = Bot(token=BOT_TOKEN)
@@ -224,20 +225,6 @@ def yes_no_keyboard():
     return keyboard
 
 
-
-
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
 # ------------ Команды ------------
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
@@ -258,7 +245,44 @@ async def start_command(message: types.Message):
         "Для просмотра главного меню введите /home.",
         reply_markup=main_menu_keyboard()
     )
+    
+# ------------------------------------------------------------------------------------------------------------------------------------------------ 
+# ------------ Обработка лайков и дизлайков
+# ------------------------------------------------------------------------------------------------------------------------------------------------ 
+async def process_heart_or_dislike(message: types.Message):
+    """
+    Обработчик добавления в избранное (❤️) или дизлайка (👎).
+    """
+    # Вытаскиваем source_id из текста reply_to_message
+    reply_text = message.reply_to_message.text
+    # Найдём строку 'Source ID: ...'
+    source_id = None
+    parsed_at = None
 
+    for line in reply_text.split('\n'):
+        if line.strip().startswith("Source ID:"):
+            source_id = line.split("Source ID:")[1].strip()
+        if line.strip().startswith("Дата парсинга:"):
+            parsed_at_str = line.split("Дата парсинга:")[1].strip()
+            if parsed_at_str and parsed_at_str.lower() != 'none':
+                # Попробуем привести к дате
+                parsed_at = datetime.datetime.strptime(parsed_at_str, '%Y-%m-%d').date()
+
+    if not source_id:
+        await message.reply("Ошибка: не найден source_id у объекта.")
+        return
+
+    if message.text == "❤️":
+        # Добавляем в избранное
+        if is_in_favourite(message.from_user.id, source_id):
+            await message.reply("Этот объект уже был добавлен в избранное ранее.")
+        else:
+            add_to_favourite(message.from_user.id, source_id, parsed_at)
+            await message.reply("Объект добавлен в избранное.")
+    elif message.text == "👎":
+        # Дизлайк
+        add_to_dislike(message.from_user.id, source_id)
+        await message.reply("Объект помечен как недостоверный.")
 
 
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
@@ -403,10 +427,6 @@ async def favourite_objects_command(message: types.Message):
             await message.reply(reply_text, reply_markup=emoji_keyboard())
         await message.reply("Вот полный список Ваших избранных объектов.", reply_markup=main_menu_keyboard())
 
-# Добавь логику ИСКЛЮЧЕНИЯ из избранного
-# Добавь проверку, чтобы объект был в избранном и больше не актуален
-# Добавь фильтр по городу
-
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
@@ -443,7 +463,6 @@ async def home_command(message: types.Message):
         "/home - Показать это сообщение",
         reply_markup=main_menu_keyboard()
     )
-
 
 
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
@@ -761,6 +780,10 @@ async def proceed_to_offers_onebyone_mode(message: types.Message, state: FSMCont
     # Сохраняем их в state, чтобы вести итерацию
     await state.update_data(objects_list=objects_list, current_index=0)
 
+    # Записываем время начала сессии
+    start_dt = datetime.datetime.now()
+    await state.update_data(start_dt=start_dt)
+
     await message.reply(
         "Начинаем показ объектов по одному. После каждого объекта Вы ответите на 2 вопроса.",
         reply_markup=types.ReplyKeyboardRemove()
@@ -773,6 +796,29 @@ async def show_next_object_onebyone(message: types.Message, state: FSMContext):
     objects_list = data['objects_list']
     current_index = data['current_index']
     if current_index >= len(objects_list):
+        # Фиксируем время окончания сессии
+        end_dt = datetime.datetime.now()
+        start_dt = data.get('start_dt')
+        city = data.get('city')
+        # Вычисляем разницу во времени
+        full_time = end_dt - start_dt
+        # Записываем данные в таблицу agent_time
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''CREATE TABLE IF NOT EXISTS agent_time (
+                            telegram_id BIGINT,
+                            start_dt TIMESTAMP,
+                            end_dt TIMESTAMP,
+                            full_time INTERVAL,
+                            city TEXT)''')
+        cursor.execute('''
+            INSERT INTO agent_time (telegram_id, start_dt, end_dt, full_time, city)
+            VALUES (%s, %s, %s, %s, %s)
+        ''', (message.from_user.id, start_dt, end_dt, full_time, city))
+        conn.commit()
+        cursor.close()
+        conn.close()
+
         await message.reply("Это были все объекты! Спасибо большое за предоставленную обратную связь🙏😊\n"
                             "Чтобы рассмотреть предложения по иному фильтру воспользуйтесь командой /offerObjects вновь.\n\n"
                             "Также любое время вы можете оценить объект (добавить его в избранное или поставить дизлайк). "
@@ -917,48 +963,6 @@ async def handle_display_objects_ready(message: types.Message, state: FSMContext
     else:
         await message.reply("Если вы закончили просмотр объектов, нажмите 'Готово'.")
 
-
-
-
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ------------ Обработка лайков и дизлайков
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-async def process_heart_or_dislike(message: types.Message):
-    """
-    Обработчик добавления в избранное (❤️) или дизлайка (👎).
-    """
-    # Вытаскиваем source_id из текста reply_to_message
-    reply_text = message.reply_to_message.text
-    # Найдём строку 'Source ID: ...'
-    source_id = None
-    parsed_at = None
-
-    for line in reply_text.split('\n'):
-        if line.strip().startswith("Source ID:"):
-            source_id = line.split("Source ID:")[1].strip()
-        if line.strip().startswith("Дата парсинга:"):
-            parsed_at_str = line.split("Дата парсинга:")[1].strip()
-            if parsed_at_str and parsed_at_str.lower() != 'none':
-                # Попробуем привести к дате
-                parsed_at = datetime.datetime.strptime(parsed_at_str, '%Y-%m-%d').date()
-
-    if not source_id:
-        await message.reply("Ошибка: не найден source_id у объекта.")
-        return
-
-    if message.text == "❤️":
-        # Добавляем в избранное
-        if is_in_favourite(message.from_user.id, source_id):
-            await message.reply("Этот объект уже был добавлен в избранное ранее.")
-        else:
-            add_to_favourite(message.from_user.id, source_id, parsed_at)
-            await message.reply("Объект добавлен в избранное.")
-    elif message.text == "👎":
-        # Дизлайк
-        add_to_dislike(message.from_user.id, source_id)
-        await message.reply("Объект помечен как недостоверный.")
-
-
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
 # ---------------- Обработчик неизвестных команд ----------------
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
@@ -978,5 +982,3 @@ async def handle_unknown_command(message: types.Message):
 # Запуск бота
 if __name__ == '__main__':
     executor.start_polling(dp, skip_updates=True)
-
-
