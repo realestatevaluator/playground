@@ -3,11 +3,16 @@ from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters import Command, Text, RegexpCommandsFilter
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
-import psycopg2
+from aiogram.utils.callback_data import CallbackData
 import time
+import numpy as np
 import datetime
+import pandas as pd
+from io import BytesIO
+from aiogram.types import InputFile
+import psycopg2
 
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token='')
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
@@ -17,6 +22,8 @@ DB_PASSWORD = "iPJenuTt"
 DB_HOST = "31.184.253.116"
 DB_PORT = "5432"
 
+
+feedback_callback = CallbackData("feedback", "question", "answer")
 # Класс пользователя для работы с базой данных
 class User:
     def __init__(self, telegram_id):
@@ -101,9 +108,9 @@ class OfferObjectsStates(StatesGroup):
     PriceTo = State()
     RoomsFrom = State()
     RoomsTo = State()
-    DisplayMode = State()      # Спрашиваем Готов ли пользователь давать отзыв по каждому объекту
-    DisplayOneByOne = State()  # Последовательное отображение объектов для пользователей с подпиской feedback
-    DisplayObjects = State()   # Одномоментное отображение (если подписка без feedback)
+    DisplayMode = State()
+    DisplayOneByOne = State()
+    DisplayObjects = State()
     LikeObject = State()
 
 class OfferFeedbackStates(StatesGroup):
@@ -117,7 +124,8 @@ class FeedbackStates(StatesGroup):
     Comment = State()
 
 class FavouriteObjectsStates(StatesGroup):
-    Idle = State()
+    City = State()
+    ViewMode = State()
 
 # ------------ Вспомогательные функции ------------
 
@@ -134,7 +142,7 @@ def get_db_connection():
 def get_max_parsed_date():
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT MAX(date(parsed_at)) FROM test_table_2;")
+    cursor.execute("SELECT MAX(date(parsed_at)) FROM flats;")
     max_date = cursor.fetchone()[0]
     cursor.close()
     conn.close()
@@ -148,7 +156,9 @@ def is_in_favourite(telegram_id, source_id):
         CREATE TABLE IF NOT EXISTS favourite_objects (
             telegram_id BIGINT,
             source_id TEXT,
-            parsed_at DATE
+            parsed_at DATE,
+            price_object INTEGER,
+            object_index INTEGER
         )
     ''')
     cursor.execute('''
@@ -162,21 +172,23 @@ def is_in_favourite(telegram_id, source_id):
     return (row is not None)
 
 # Добавить в избранное
-def add_to_favourite(telegram_id, source_id, parsed_at):
+def add_to_favourite(telegram_id, source_id, parsed_at, price_object, object_index):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS favourite_objects (
             telegram_id BIGINT,
             source_id TEXT,
-            parsed_at DATE
+            parsed_at DATE,
+            price_object INTEGER,  -- Новый столбец
+            object_index INTEGER    -- Новый столбец
         )
     ''')
     # Вставляем запись
     cursor.execute('''
-        INSERT INTO favourite_objects (telegram_id, source_id, parsed_at)
-        VALUES (%s, %s, %s)
-    ''', (telegram_id, source_id, parsed_at))
+        INSERT INTO favourite_objects (telegram_id, source_id, parsed_at, price_object, object_index)
+        VALUES (%s, %s, %s, %s, %s)
+    ''', (telegram_id, source_id, parsed_at, price_object, object_index))
     conn.commit()
     cursor.close()
     conn.close()
@@ -249,19 +261,31 @@ async def start_command(message: types.Message):
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
 # ------------ Обработка лайков и дизлайков
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
+@dp.message_handler(Text(equals=["❤️", "👎"]), state="*")
 async def process_heart_or_dislike(message: types.Message):
     """
     Обработчик добавления в избранное (❤️) или дизлайка (👎).
     """
     # Вытаскиваем source_id из текста reply_to_message
-    reply_text = message.reply_to_message.text
+    # reply_text = message.reply_to_message.text
+    if message.reply_to_message:
+        reply_text = message.reply_to_message.text
+    else:
+        await message.answer("Эта команда должна быть ответом на сообщение.")
+        return
     # Найдём строку 'Source ID: ...'
     source_id = None
     parsed_at = None
+    price_object = None
+    object_index = None
 
     for line in reply_text.split('\n'):
         if line.strip().startswith("Source ID:"):
             source_id = line.split("Source ID:")[1].strip()
+        if line.strip().startswith("Цена:"):
+            price_object = int(float(line.split("Цена:")[1].strip()))
+        if line.strip().startswith("Объект №"):
+            object_index = float(line.split("Объект №")[1].split(":")[0].strip())
         if line.strip().startswith("Дата парсинга:"):
             parsed_at_str = line.split("Дата парсинга:")[1].strip()
             if parsed_at_str and parsed_at_str.lower() != 'none':
@@ -277,7 +301,7 @@ async def process_heart_or_dislike(message: types.Message):
         if is_in_favourite(message.from_user.id, source_id):
             await message.reply("Этот объект уже был добавлен в избранное ранее.")
         else:
-            add_to_favourite(message.from_user.id, source_id, parsed_at)
+            add_to_favourite(message.from_user.id, source_id, parsed_at, price_object, object_index)
             await message.reply("Объект добавлен в избранное.")
     elif message.text == "👎":
         # Дизлайк
@@ -296,7 +320,7 @@ async def feedback_command(message: types.Message):
     )
     # Вопрос 1
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add("Да", "Нет")
+    keyboard.add("Да", "Нет", "/home")
     await message.reply("1/4 Являются ли объекты недооцененными в целом? (Да/Нет)", reply_markup=keyboard)
     await FeedbackStates.Answer1.set()
 
@@ -308,7 +332,7 @@ async def process_feedback_answer1(message: types.Message, state: FSMContext):
         return
     await state.update_data(answer1=message.text)
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add("0", "1-3", ">3", "все предложенные варианты полезны")
+    keyboard.add("0", "1-3", ">3", "все предложенные варианты полезны", "/home")
     await message.reply("2/4 Сколько предложений оказались полезны?", reply_markup=keyboard)
     await FeedbackStates.Answer2.set()
 
@@ -320,8 +344,8 @@ async def process_feedback_answer2(message: types.Message, state: FSMContext):
         return
     await state.update_data(answer2=message.text)
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add("Да", "Нет")
-    await message.reply("3/4Была ли информация об объектах полной и достоверной?", reply_markup=keyboard)
+    keyboard.add("Да", "Нет", "/home")
+    await message.reply("3/4 Была ли информация об объектах полной и достоверной?", reply_markup=keyboard)
     await FeedbackStates.Answer3.set()
 
 @dp.message_handler(state=FeedbackStates.Answer3)
@@ -372,60 +396,190 @@ async def process_feedback_comment(message: types.Message, state: FSMContext):
 # ---------------- /favouriteObjects ----------------
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
 @dp.message_handler(commands=['favouriteObjects'])
-async def favourite_objects_command(message: types.Message):
+async def favourite_objects_choose_city(message: types.Message):
+    # Клавиатура для выбора города
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add("Нижний Новгород", "Казань", "Самара", "/home")
+    await message.reply("Выберите город для просмотра избранных объектов:", reply_markup=keyboard)
+    await FavouriteObjectsStates.City.set()
+
+@dp.message_handler(state=FavouriteObjectsStates.City)
+async def ask_view_mode(message: types.Message, state: FSMContext):
+    if message.text.startswith('/'):
+        await state.finish()
+        await message.reply("Операция прервана.", reply_markup=main_menu_keyboard())
+        return
+
+    selected_city = message.text
+    allowed_cities = ["Нижний Новгород", "Казань", "Самара"]
+
+    if selected_city not in allowed_cities:
+        await message.reply("Пожалуйста, выберите город из предложенных вариантов.")
+        return
+
+    await state.update_data(city=selected_city)
+
+    # Предлагаем способ вывода
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add("Посмотреть тут", "Выгрузить в Excel", "/home")
+    await message.reply("Как вы хотите получить список избранных объектов?", reply_markup=keyboard)
+    await FavouriteObjectsStates.ViewMode.set()
+
+@dp.message_handler(state=FavouriteObjectsStates.ViewMode)
+async def handle_view_mode_choice(message: types.Message, state: FSMContext):
+    if message.text.startswith('/'):
+        await state.finish()
+        await message.reply("Операция прервана.", reply_markup=main_menu_keyboard())
+        return
+
+    data = await state.get_data()
+    selected_city = data['city']
+
+    if message.text == "Посмотреть тут":
+        await show_favourite_objects_in_chat(message, state, selected_city)
+    elif message.text == "Выгрузить в Excel":
+        await export_favourite_objects_to_excel(message, state, selected_city)
+    else:
+        await state.finish()
+        await message.reply("Операция отменена.", reply_markup=main_menu_keyboard())
+
+async def show_favourite_objects_in_chat(message: types.Message, state: FSMContext, city: str):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS favourite_objects (
-            telegram_id BIGINT,
-            source_id TEXT,
-            parsed_at DATE
-        )
-    ''')
-    # Для вывода описания так же нужно соединить с test_table, чтобы достать title, price_object и т.д.
+
     query = '''
-        SELECT t.title,
-               t.price_object,
-               t.area,
-               t.address,
-               t.url_link,
-               f.source_id,
-               t.parsed_at
-        FROM favourite_objects f
-        JOIN test_table_2 t ON f.source_id = t.source_id
-        WHERE f.telegram_id = %s
-        ORDER BY t.price_object
+    WITH 
+    ranked_objects AS (
+        SELECT *,
+               ROW_NUMBER() OVER (
+                   PARTITION BY source_id
+                   ORDER BY parsed_at DESC, year_buld ASC, price_object ASC
+               ) AS rn
+        FROM flats_active
+    ),
+    rranked_objects AS (
+        SELECT * FROM ranked_objects WHERE rn = 1
+    )
+    SELECT t.title,
+           t.price_object as actual_price,
+           f.price_object as favourite_price,
+           t.area,
+           t.address,
+           t.url_link,
+           f.source_id,
+           d.rank,
+           t.city,
+           t.parsed_at
+    FROM favourite_objects f
+    JOIN rranked_objects t ON f.source_id = t.source_id
+    LEFT JOIN res_table d ON d.source_id = t.source_id
+    WHERE f.telegram_id = %s AND t.city = %s
+    ORDER BY d.rank desc;
     '''
-    cursor.execute(query, (message.from_user.id,))
+
+    cursor.execute(query, (message.from_user.id, city))
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
 
     if not rows:
-        await message.reply("У Вас ещё нет понравившихся объектов или эти объявления больше не актуальны.", reply_markup=main_menu_keyboard())
-    else:
-        await message.reply("Ваши избранные объекты:")
-        max_date = get_max_parsed_date()
-        for idx, obj in enumerate(rows, start=1):
-            title, price_object, area, address, url_link, source_id, parsed_at = obj
+        await message.reply(f"У Вас нет избранных объектов в городе {city}.", reply_markup=main_menu_keyboard())
+        await state.finish()
+        return
 
-            bracket_label = ""
-            in_fav = True  # Это уже избранное
-            parsed_date_only = parsed_at.date() if parsed_at else None
-            if parsed_date_only == max_date:
-                bracket_label = "(избранное предложение изменилось)"
-
+    await message.reply(f"Ваши избранные объекты в городе {city}:")
+    for idx, obj in enumerate(rows, start=1):
+        title, actual_price, favourite_price, area, address, url_link, source_id, rank, city, parsed_at = obj
+        bracket_label = ""
+        if actual_price != favourite_price:
+            bracket_label = "(цена изменилась)"
             reply_text = (
                 f"{title} {bracket_label}\n"
-                f"Цена: {price_object}\n"
+                f"Новая цена: {actual_price}\n"
+                f"Старая цена: {favourite_price}\n"
                 f"Площадь: {area}\n"
                 f"Адрес: {address}\n"
-                # f"Source ID: {source_id}\n"
-                # f"Дата парсинга: {parsed_date_only}\n"
+                f"Source ID: {source_id}\n"
                 f"{url_link}"
             )
-            await message.reply(reply_text, reply_markup=emoji_keyboard())
-        await message.reply("Вот полный список Ваших избранных объектов.", reply_markup=main_menu_keyboard())
+        else:
+            reply_text = (
+                f"{title} {bracket_label}\n"
+                f"Цена: {actual_price}\n"
+                f"Площадь: {area}\n"
+                f"Адрес: {address}\n"
+                f"Source ID: {source_id}\n"
+                f"{url_link}"
+            )
+
+        await message.reply(reply_text)
+
+    await message.reply("Вот полный список ваших избранных объектов в этом городе.", reply_markup=main_menu_keyboard())
+    await state.finish()
+
+async def export_favourite_objects_to_excel(message: types.Message, state: FSMContext, city: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    query = '''
+    WITH 
+    ranked_objects AS (
+        SELECT *,
+               ROW_NUMBER() OVER (
+                   PARTITION BY source_id
+                   ORDER BY parsed_at DESC, year_buld ASC, price_object ASC
+               ) AS rn
+        FROM flats_active
+    ),
+    rranked_objects AS (
+        SELECT * FROM ranked_objects WHERE rn = 1
+    )
+    SELECT t.title,
+           t.price_object as actual_price,
+           f.price_object as favourite_price,
+           t.area,
+           t.address,
+           t.url_link,
+           f.source_id,
+           t.city
+    FROM favourite_objects f
+    JOIN rranked_objects t ON f.source_id = t.source_id
+    LEFT JOIN res_table d ON d.source_id = t.source_id
+    WHERE f.telegram_id = %s AND t.city = %s
+    ORDER BY d.rank desc;
+    '''
+
+    cursor.execute(query, (message.from_user.id, city))
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    if not rows:
+        await message.reply(f"У Вас нет избранных объектов в городе {city}.", reply_markup=main_menu_keyboard())
+        await state.finish()
+        return
+
+    # Формируем DataFrame
+    df = pd.DataFrame(rows, columns=[
+        'Название', 'Текущая цена', 'Цена при добавлении', 'Площадь', 'Адрес', 'Ссылка', 'Source ID', 'Город'
+    ])
+
+    # Сохраняем в буфер
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine='openpyxl') as writer:
+        df.index += 1
+        df.to_excel(writer, index=True)
+        # pd.DataFrame(df, index=np.arange(1, len(df)+1)).to_excel(writer, index=True)
+    bio.seek(0)
+
+    # Отправляем файл
+    await bot.send_document(
+        chat_id=message.chat.id,
+        document=InputFile(bio, filename=f"favourites_{city}_{datetime.date.today()}.xlsx"),
+        caption="Вот ваша выгрузка избранных объектов в формате Excel."
+    )
+    await message.reply("Вы можете повторить подбор командой /favouriteObjects.", reply_markup=main_menu_keyboard())
+    await state.finish()
 
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
@@ -479,8 +633,6 @@ async def subscription_command(message: types.Message):
         await message.reply(
             f"Ваша подписка активна!\n"
             f"Тип подписки: {subscription_type}\n"
-            # f"Дата начала: {start_dt}\n"
-            # f"Дата окончания: {end_dt}\n"
             f"До конца подписки осталось {days_left} дней.\n",
             reply_markup=main_menu_keyboard()
         )
@@ -620,6 +772,10 @@ async def process_filter_choice(message: types.Message, state: FSMContext):
 
 @dp.message_handler(state=OfferObjectsStates.PriceFrom)
 async def process_price_from(message: types.Message, state: FSMContext):
+    if message.text.startswith('/'):
+        await state.finish()
+        await message.reply("Операция прервана.", reply_markup=main_menu_keyboard())
+        return
     if not message.text.isdigit():
         await message.reply("Пожалуйста, введите целое число.")
         return
@@ -630,6 +786,10 @@ async def process_price_from(message: types.Message, state: FSMContext):
 
 @dp.message_handler(state=OfferObjectsStates.PriceTo)
 async def process_price_to(message: types.Message, state: FSMContext):
+    if message.text.startswith('/'):
+        await state.finish()
+        await message.reply("Операция прервана.", reply_markup=main_menu_keyboard())
+        return
     if not message.text.isdigit():
         await message.reply("Пожалуйста, введите целое число.")
         return
@@ -647,6 +807,10 @@ async def process_price_to(message: types.Message, state: FSMContext):
 
 @dp.message_handler(state=OfferObjectsStates.RoomsFrom)
 async def process_rooms_from(message: types.Message, state: FSMContext):
+    if message.text.startswith('/'):
+        await state.finish()
+        await message.reply("Операция прервана.", reply_markup=main_menu_keyboard())
+        return
     if not message.text.isdigit():
         await message.reply("Пожалуйста, введите целое число.")
         return
@@ -657,6 +821,10 @@ async def process_rooms_from(message: types.Message, state: FSMContext):
 
 @dp.message_handler(state=OfferObjectsStates.RoomsTo)
 async def process_rooms_to(message: types.Message, state: FSMContext):
+    if message.text.startswith('/'):
+        await state.finish()
+        await message.reply("Операция прервана.", reply_markup=main_menu_keyboard())
+        return
     if not message.text.isdigit():
         await message.reply("Пожалуйста, введите целое число.")
         return
@@ -674,8 +842,15 @@ async def process_rooms_to(message: types.Message, state: FSMContext):
 
 # После того, как пользователь сказал "Готово" по фильтрам, проверяем, есть ли у него подписка с обратной связью
 async def proceed_to_check_feedback_mode(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    sample_size = data.get("sample_size")
+
     user = User(message.from_user.id)
     subscription_info = user.get_subscription_info()
+
+    if sample_size is None:  # "все объекты"
+        await generate_excel_file(message, state)
+
     if subscription_info and subscription_info[2] == 1:
         # Подписка с обратной связью, спрашиваем готовность
         await message.reply(
@@ -688,6 +863,43 @@ async def proceed_to_check_feedback_mode(message: types.Message, state: FSMConte
     else:
         # Без обратной связи - просто показываем объекты сразу списком
         await proceed_to_offers_list_mode(message, state)
+
+
+async def generate_excel_file(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    city = data['city']
+    filters = data.get('filters', {})
+
+    objects = get_filtered_objects(city, filters, sample_size=None, id=message.from_user.id)  # sample_size не ограничиваем
+
+    if not objects:
+        await message.reply("К сожалению, по заданным фильтрам объекты не найдены.", reply_markup=main_menu_keyboard())
+        await state.finish()
+        return
+
+    # Формируем DataFrame
+    df = pd.DataFrame(objects, columns=[
+        'Название', 'Цена', 'Площадь', 'Адрес', 'Ссылка', 'Source ID', 'Дата парсинга', 'Ранг'
+    ])
+
+    # Сохраняем в буфер
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine='openpyxl') as writer:
+        df.index += 1
+        df.to_excel(writer, index=True)
+
+    bio.seek(0)
+
+    # Отправляем файл
+    await bot.send_document(
+        chat_id=message.chat.id,
+        document=types.InputFile(bio, filename=f"objects_{city}_{datetime.date.today()}.xlsx"),
+        caption="Вот полный список объектов в формате Excel."
+    )
+
+    await state.finish()
+    await message.reply("Вы можете повторить подбор командой /offerObjects.", reply_markup=main_menu_keyboard())
+
 
 @dp.message_handler(state=OfferObjectsStates.DisplayMode)
 async def feedback_mode_decision(message: types.Message, state: FSMContext):
@@ -710,7 +922,7 @@ async def proceed_to_offers_list_mode(message: types.Message, state: FSMContext)
     sample_size = data.get('sample_size')
     filters = data.get('filters', {})
 
-    objects = get_filtered_objects(city, filters, sample_size)
+    objects = get_filtered_objects(city, filters, sample_size, id=message.from_user.id)
 
     if not objects:
         await message.reply("К сожалению, по заданным фильтрам объекты не найдены.", reply_markup=main_menu_keyboard())
@@ -722,45 +934,73 @@ async def proceed_to_offers_list_mode(message: types.Message, state: FSMContext)
     else:
         await message.reply("Предлагаем вам полный список объектов:")
 
-    max_date = get_max_parsed_date()  # дата-максимум из test_table
 
     # Показываем все объекты одним списком
     for idx, obj in enumerate(objects, start=1):
-        (title, price_object, area, address, url_link, source_id, parsed_at) = obj
+        (title, price_object, area, address, url_link, source_id, parsed_at, rank) = obj
 
         # Проверяем в избранном ли объект
         in_fav = is_in_favourite(message.from_user.id, source_id)
         # Формируем приписку
         bracket_label = ""
-        parsed_date_only = parsed_at if parsed_at else None
+        # достать цену объекта в избранном
+        # если оно изменилось - соответсвующий текст
+        if in_fav:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            query = '''
+                SELECT  f.price_object as favourite_price
+                FROM favourite_objects f
+                WHERE f.telegram_id = %s and source_id = %s
+            '''
+            cursor.execute(query, (message.from_user.id, str(source_id),))
+            rows = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            if rows:
+                for row in rows:
+                    favourite_price = row[0]
 
-        if parsed_date_only == max_date:
-            if in_fav:
-                bracket_label = "(избранное предложение изменилось)"
+            if price_object != favourite_price:
+                bracket_label = "(уже в избранном, цена изменилась)"
+                reply_text = (
+                f"Объект №{idx}\n"
+                f"{title} {bracket_label}\n"
+                f"Новая цена: {price_object}\n"
+                f"Старая цена: {favourite_price}\n"
+                f"Площадь: {area}\n"
+                f"Адрес: {address}\n"
+                f"Source ID: {source_id}\n"
+                f"{url_link}")
+
             else:
-                bracket_label = "(новый)"
-        else:
-            if in_fav:
                 bracket_label = "(уже в избранном)"
+                reply_text = (
+                f"Объект №{idx}\n"
+                f"{title} {bracket_label}\n"
+                f"Цена: {price_object}\n"
+                f"Площадь: {area}\n"
+                f"Адрес: {address}\n"
+                f"Source ID: {source_id}\n"
+                f"{url_link}")
 
-        reply_text = (
-            f"{idx}) {title} {bracket_label}\n"
+        else:
+            reply_text = (
+            f"Объект №{idx}\n"
+            f"{title} {bracket_label}\n"
             f"Цена: {price_object}\n"
             f"Площадь: {area}\n"
             f"Адрес: {address}\n"
-            # f"Source ID: {source_id}\n"
-            # f"Дата парсинга: {parsed_date_only}\n"
-            f"{url_link}"
-        )
-        await message.reply(reply_text, reply_markup=emoji_keyboard())
+            f"Source ID: {source_id}\n"
+            f"{url_link}")
+
+        await message.reply(reply_text, reply_markup=main_menu_keyboard())
 
     await message.reply(
-        "В любое время вы можете оценить объект (добавить его в избранное или поставить дизлайк). "
-        "Для этого воспользуйтесь функцией telegram 'Ответить' для сообщения-объекта и отправьте '❤️' или '👎' вместе с ответом.\n\n"
-        "Для завершения или повторного отбора нажмите 'Готово'.",
-        reply_markup=emoji_keyboard()
-    )
-    await OfferObjectsStates.DisplayObjects.set()
+        "Чтобы рассмотреть предложения по иному фильтру воспользуйтесь командой /offerObjects вновь.\n\n"
+        "Также любое время вы можете оценить объект (добавить его в избранное или поставить дизлайк). "
+        "Для этого воспользуйтесь функцией telegram 'Ответить' для сообщения-объекта и отправьте '❤️' или '👎' вместе с ответом.", reply_markup=main_menu_keyboard())
+
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
 # ------------------------------------------------------------------------------------------------------------------------------------------------ 
 # ------------ Показ объектов по одному (для тех, у кого есть feedback-подписка) ------------
@@ -771,7 +1011,7 @@ async def proceed_to_offers_onebyone_mode(message: types.Message, state: FSMCont
     sample_size = data.get('sample_size')
     filters = data.get('filters', {})
 
-    objects_list = get_filtered_objects(city, filters, sample_size)
+    objects_list = get_filtered_objects(city, filters, sample_size, id=message.from_user.id)
     if not objects_list:
         await message.reply("К сожалению, по заданным фильтрам объекты не найдены.", reply_markup=main_menu_keyboard())
         await state.finish()
@@ -827,38 +1067,77 @@ async def show_next_object_onebyone(message: types.Message, state: FSMContext):
         return
     max_date = get_max_parsed_date()
     obj = objects_list[current_index]
-    (title, price_object, area, address, url_link, source_id, parsed_at) = obj
+    (title, price_object, area, address, url_link, source_id, parsed_at, rank) = obj
+    # Проверяем в избранном ли объект
     in_fav = is_in_favourite(message.from_user.id, source_id)
+    # Формируем приписку
     bracket_label = ""
-    parsed_date_only = parsed_at
+    # достать цену объекта в избранном
+    # если оно изменилось - соответсвующий текст
+    if in_fav:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        query = '''
+            SELECT  f.price_object as favourite_price
+            FROM favourite_objects f
+            WHERE f.telegram_id = %s and source_id = %s
+        '''
+        cursor.execute(query, (message.from_user.id,str(source_id), ))
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        if rows:
+            for row in rows:
+                favourite_price = row[0]
 
-    if parsed_date_only == max_date:
-        if in_fav:
-            bracket_label = "(избранное предложение изменилось)"
+        if price_object != favourite_price:
+            bracket_label = "(уже в избранном, цена изменилась)"
+            reply_text = (
+            f"Объект №{current_index + 1}\n"
+            f"{title} {bracket_label}\n"
+            f"Новая цена: {price_object}\n"
+            f"Старая цена: {favourite_price}\n"
+            f"Площадь: {area}\n"
+            f"Адрес: {address}\n"
+            f"Source ID: {source_id}\n"
+            f"{url_link}")
+
         else:
-            bracket_label = "(новый)"
-    else:
-        if in_fav:
             bracket_label = "(уже в избранном)"
+            reply_text = (
+            f"Объект №{current_index + 1}\n"
+            f"{title} {bracket_label}\n"
+            f"Цена: {price_object}\n"
+            f"Площадь: {area}\n"
+            f"Адрес: {address}\n"
+            f"Source ID: {source_id}\n"
+            f"{url_link}")
 
-    reply_text = (
-        f"Объект №{current_index + 1}: {title} {bracket_label}\n"
+    else:
+        reply_text = (
+        f"Объект №{current_index + 1}\n"
+        f"{title} {bracket_label}\n"
         f"Цена: {price_object}\n"
         f"Площадь: {area}\n"
         f"Адрес: {address}\n"
-        # f"Source ID: {source_id}\n"
-        # f"Дата парсинга: {parsed_date_only}\n"
-        f"{url_link}"
-    )
+        f"Source ID: {source_id}\n"
+        f"{url_link}")
+
     await message.reply(reply_text)
     await state.update_data(current_source_id=source_id)
+
     await message.reply(
         "Вопрос 1: Является ли предложенный объект недвижимости недооцененным?",
         reply_markup=yes_no_keyboard()
     )
     await OfferFeedbackStates.WaitUndersaleAnswer.set()
+
 @dp.message_handler(state=OfferFeedbackStates.WaitUndersaleAnswer)
 async def process_undersale_answer(message: types.Message, state: FSMContext):
+    if message.text.startswith('/'):
+        await state.finish()
+        await message.reply("Операция прервана.", reply_markup=main_menu_keyboard())
+        return
     if message.text not in ["Да", "Нет"]:
         await message.reply("Пожалуйста, ответьте 'Да' или 'Нет'.")
         return
@@ -871,6 +1150,10 @@ async def process_undersale_answer(message: types.Message, state: FSMContext):
 
 @dp.message_handler(state=OfferFeedbackStates.WaitMismatchAnswer)
 async def process_mismatch_answer(message: types.Message, state: FSMContext):
+    if message.text.startswith('/'):
+        await state.finish()
+        await message.reply("Операция прервана.", reply_markup=main_menu_keyboard())
+        return
     if message.text not in ["Да", "Нет"]:
         await message.reply("Пожалуйста, ответьте 'Да' или 'Нет'.")
         return
@@ -906,28 +1189,29 @@ async def process_mismatch_answer(message: types.Message, state: FSMContext):
 
 
 # Извлечение списка объектов с учётом фильтров
-def get_filtered_objects(city, filters, sample_size):
+def get_filtered_objects(city, filters, sample_size, id):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
         SELECT column_name
         FROM information_schema.columns
-        WHERE table_name='test_table_2'
+        WHERE table_name='res_table'
     ''')
 
     query = '''
         SELECT title,
-               price_object,
-               area,
-               address,
-               url_link,
-               source_id,
-               date(parsed_at)
-        FROM test_table_2
-        WHERE lower(city) = lower(%s)
-          AND low_flag = 1
+            price_object,
+            area,
+            address,
+            url_link,
+            r.source_id,
+            date(parsed_at),
+            rank
+        FROM res_table r
+        LEFT JOIN dislike_objects do2 on r.source_id = do2.source_id and do2.telegram_id = %s
+        WHERE lower(city) = lower(%s) AND do2.source_id is null
     '''
-    params = [city]
+    params = [id, city]
 
     if 'price' in filters:
         price_from, price_to = filters['price']
@@ -941,7 +1225,7 @@ def get_filtered_objects(city, filters, sample_size):
         params.append(r_from)
         params.append(r_to)
 
-    query += ' ORDER BY price_object'
+    query += ' ORDER BY rank desc'
 
     if sample_size is not None:
         query += ' LIMIT %s'
@@ -954,18 +1238,6 @@ def get_filtered_objects(city, filters, sample_size):
 
     return objects
 
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-@dp.message_handler(state=OfferObjectsStates.DisplayObjects)
-async def handle_display_objects_ready(message: types.Message, state: FSMContext):
-    if message.text == "Готово":
-        await state.finish()
-        await message.reply("Спасибо! Вы можете повторить подбор объектов командой /offerObjects.", reply_markup=main_menu_keyboard())
-    else:
-        await message.reply("Если вы закончили просмотр объектов, нажмите 'Готово'.")
-
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ---------------- Обработчик неизвестных команд ----------------
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
 @dp.message_handler()
 async def handle_unknown_command(message: types.Message):
     if message.text.startswith('/'):
@@ -974,11 +1246,6 @@ async def handle_unknown_command(message: types.Message):
         await message.reply("Пожалуйста, используйте команды бота. Введите /home для получения списка команд.", reply_markup=main_menu_keyboard())
 
 
-
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
-# ------------------------------------------------------------------------------------------------------------------------------------------------ 
 # Запуск бота
 if __name__ == '__main__':
     executor.start_polling(dp, skip_updates=True)
